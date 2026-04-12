@@ -1,0 +1,519 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Snake Game — AWS 3層アーキテクチャ
+  プレゼンテーション: S3 + CloudFront
+  アプリケーション:   API Gateway + Lambda
+  データ:             RDS MySQL (VPC 内)
+  セキュリティ:       Secrets Manager によるパスワード管理 (ManageMasterUserPassword)
+  ネットワーク:       VPC Interface/Gateway エンドポイントによるプライベート通信
+  自動化:             Custom Resource による RDS スキーマ自動初期化
+
+# ============================================================
+# パラメータ
+# ============================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: snake-game
+    Description: リソース名プレフィックス
+
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, stg, prod]
+    Description: デプロイステージ（prod 時は MultiAZ・DeletionProtection 自動有効化）
+
+  DBName:
+    Type: String
+    Default: snake_game
+
+  DBUser:
+    Type: String
+    Default: admin
+
+  # ----------------------------------------------------------------
+  # [修正A] DBPassword パラメータを削除
+  #   理由: NoEcho は画面表示を隠すだけで CloudFormation 内部には平文保存される。
+  #         RDS ManageMasterUserPassword を使い Secrets Manager に完全移行する。
+  # ----------------------------------------------------------------
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Lambda と RDS を配置する VPC
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: プライベートサブネット 1（Lambda / RDS）
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: プライベートサブネット 2（RDS Multi-AZ 用）
+
+  PrivateRouteTable:
+    Type: String
+    Description: |
+      プライベートサブネットに紐づくルートテーブル ID
+      （S3 Gateway エンドポイントの追加先。複数ある場合は代表の 1 つを指定）
+
+# ============================================================
+# 条件
+# ============================================================
+# [修正D] Stage パラメータに応じて prod 設定を自動切り替え
+#   コメントによる「手動変更推奨」を廃止し、デプロイ時に確定させる。
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+# ============================================================
+# グローバル設定
+# ============================================================
+Globals:
+  Function:
+    Runtime:       python3.12
+    Timeout:       15
+    MemorySize:    256
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        DB_HOST: !GetAtt RDSInstance.Endpoint.Address
+        DB_PORT: '3306'
+        DB_NAME: !Ref DBName
+        DB_USER: !Ref DBUser
+        # [修正A] DB_PASSWORD を削除 → 実行時に Secrets Manager から動的取得
+        SECRET_ARN: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+    VpcConfig:
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+# ============================================================
+# リソース定義
+# ============================================================
+Resources:
+
+  # ──────────────────────────────────────────────────────────
+  # [プレゼンテーション層] S3 バケット（静的ホスティング）
+  # ──────────────────────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-frontend-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls:       true
+        BlockPublicPolicy:     true
+        IgnorePublicAcls:      true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  # CloudFront → S3 OAC アクセスポリシー
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # Origin Access Control
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name:                          !Sub '${ProjectName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior:               always
+        SigningProtocol:               sigv4
+
+  # ──────────────────────────────────────────────────────────
+  # [プレゼンテーション層] CloudFront ディストリビューション
+  # ──────────────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled:           true
+        DefaultRootObject: index.html
+        HttpVersion:       http2and3
+        IPV6Enabled:       true
+        PriceClass:        PriceClass_200
+        Origins:
+          - Id:         S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OAC.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId:       S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId:        658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress:             true
+        CustomErrorResponses:
+          - ErrorCode:          403
+            ResponseCode:       200
+            ResponsePagePath:   /index.html
+            ErrorCachingMinTTL: 0
+
+  # ──────────────────────────────────────────────────────────
+  # [アプリケーション層] API Gateway（HTTP API）
+  # ──────────────────────────────────────────────────────────
+  SnakeApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub 'https://${CloudFrontDistribution.DomainName}'
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [Content-Type]
+        MaxAge: 86400
+
+  # ──────────────────────────────────────────────────────────
+  # [アプリケーション層] Lambda — スコア登録
+  # ──────────────────────────────────────────────────────────
+  PostScoreFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-post-score-${Stage}'
+      CodeUri:      ../backend/post_score/
+      Handler:      lambda_function.lambda_handler
+      Description:  スコア登録 API (POST /scores)
+      Layers:
+        - !Ref PyMySQLLayer
+      # [修正A] Secrets Manager GetSecretValue 権限を付与
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+      Events:
+        PostScore:
+          Type: HttpApi
+          Properties:
+            ApiId:  !Ref SnakeApi
+            Path:   /scores
+            Method: POST
+
+  # ──────────────────────────────────────────────────────────
+  # [アプリケーション層] Lambda — ランキング取得
+  # ──────────────────────────────────────────────────────────
+  GetRankingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-get-ranking-${Stage}'
+      CodeUri:      ../backend/get_ranking/
+      Handler:      lambda_function.lambda_handler
+      Description:  ランキング取得 API (GET /ranking)
+      Layers:
+        - !Ref PyMySQLLayer
+      # [修正A] Secrets Manager GetSecretValue 権限を付与
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+      Events:
+        GetRanking:
+          Type: HttpApi
+          Properties:
+            ApiId:  !Ref SnakeApi
+            Path:   /ranking
+            Method: GET
+
+  # ──────────────────────────────────────────────────────────
+  # Lambda Layer — PyMySQL 共有ライブラリ
+  # ──────────────────────────────────────────────────────────
+  PyMySQLLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName:               !Sub '${ProjectName}-pymysql'
+      Description:             PyMySQL for Python 3.12
+      ContentUri:              ../backend/layer/
+      CompatibleRuntimes:      [python3.12]
+      CompatibleArchitectures: [arm64]
+    Metadata:
+      BuildMethod: python3.12
+
+  # ──────────────────────────────────────────────────────────
+  # [修正C] RDS スキーマ自動初期化 — Custom Resource
+  #
+  #   問題: CloudShell は VPC 外のためプライベートサブネットの RDS に
+  #         到達できず、手動 mysql コマンドが実行不可。
+  #   解決: sam deploy 時に Lambda Custom Resource が自動でスキーマを適用。
+  #         2 回目以降は CREATE TABLE IF NOT EXISTS により冪等に動作する。
+  # ──────────────────────────────────────────────────────────
+  SchemaInitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-schema-init-${Stage}'
+      Description:  デプロイ時 RDS スキーマ自動初期化（Custom Resource）
+      # RDS 起動完了 + スキーマ適用を想定し Globals の 15s より長めに設定
+      Timeout: 60
+      Layers:
+        - !Ref PyMySQLLayer
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+      # InlineCode の場合 Handler は index.<関数名> で固定
+      Handler: index.lambda_handler
+      InlineCode: |
+        import json, os, urllib.request, boto3, pymysql
+
+        # CloudFormation へレスポンスを返す（cfnresponse モジュール非依存）
+        def cfn_send(event, context, status, reason='', data={}):
+            body = json.dumps({
+                'Status':             status,
+                'Reason':             reason or f'See CloudWatch: {context.log_stream_name}',
+                'PhysicalResourceId': context.log_stream_name,
+                'StackId':            event['StackId'],
+                'RequestId':          event['RequestId'],
+                'LogicalResourceId':  event['LogicalResourceId'],
+                'Data':               data,
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                event['ResponseURL'],
+                data=body,
+                headers={'Content-Type': ''},
+                method='PUT',
+            )
+            urllib.request.urlopen(req, timeout=10)
+
+        DDL = """
+        CREATE TABLE IF NOT EXISTS scores (
+            id            INT UNSIGNED      NOT NULL AUTO_INCREMENT,
+            player_name   VARCHAR(20)       NOT NULL DEFAULT 'ANONYMOUS',
+            score         SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+            level_reached TINYINT UNSIGNED  NOT NULL DEFAULT 1,
+            created_at    TIMESTAMP         NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_score_desc  (score DESC, created_at ASC),
+            INDEX idx_player_name (player_name),
+            INDEX idx_created_at  (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci
+        """
+
+        def lambda_handler(event, context):
+            try:
+                # スタック削除時は何もしない（テーブルは RDS ごと削除される）
+                if event['RequestType'] == 'Delete':
+                    cfn_send(event, context, 'SUCCESS')
+                    return
+
+                # Secrets Manager からパスワードを動的取得
+                sm = boto3.client('secretsmanager')
+                secret = json.loads(
+                    sm.get_secret_value(SecretId=os.environ['SECRET_ARN'])['SecretString']
+                )
+
+                conn = pymysql.connect(
+                    host=os.environ['DB_HOST'],
+                    port=int(os.environ['DB_PORT']),
+                    user=secret['username'],
+                    password=secret['password'],
+                    db=os.environ['DB_NAME'],
+                    connect_timeout=10,
+                    charset='utf8mb4',
+                )
+                with conn.cursor() as cur:
+                    cur.execute(DDL)
+                conn.commit()
+                conn.close()
+
+                cfn_send(event, context, 'SUCCESS',
+                         data={'Message': 'Schema initialized successfully'})
+
+            except Exception as exc:
+                cfn_send(event, context, 'FAILED', reason=str(exc))
+
+  # Custom Resource の実体（デプロイ時 1 回だけ SchemaInitFunction を呼び出す）
+  # DependsOn で VPC エンドポイントが確立されてから実行させる
+  SchemaInitializer:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - CloudWatchLogsEndpoint   # Lambda ログ出力に必要
+      - SecretsManagerEndpoint   # パスワード取得に必要
+      - S3GatewayEndpoint        # CloudFormation レスポンス URL (S3 署名付き URL) 送信に必要
+    Properties:
+      ServiceToken: !GetAtt SchemaInitFunction.Arn
+
+  # ──────────────────────────────────────────────────────────
+  # [ネットワーク] セキュリティグループ
+  # ──────────────────────────────────────────────────────────
+
+  # Lambda 用 SG
+  # egress はデフォルト全許可を維持する
+  # （プライベートサブネット + VPC エンドポイントで到達先を物理的に制限するため）
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda functions SG
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-sg'
+
+  # [修正B] VPC Interface エンドポイント用 SG（新規追加）
+  #   Lambda SG からの HTTPS (443) のみインバウンドを許可する
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Interface Endpoints SG - HTTPS from Lambda only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort:   443
+          ToPort:     443
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpce-sg'
+
+  # RDS 用 SG（変更なし — Lambda SG からの 3306 のみ許可）
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS MySQL SG - MySQL from Lambda only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort:   3306
+          ToPort:     3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rds-sg'
+
+  # ──────────────────────────────────────────────────────────
+  # [修正B] VPC エンドポイント（新規追加）
+  #
+  #   問題: VPC 内 Lambda はインターネットへのルートがないため、
+  #         CloudWatch Logs / Secrets Manager への通信が届かず
+  #         ログが一切出力されずデバッグ不能になる。
+  #   解決: Interface エンドポイントで VPC 内にサービスを引き込む。
+  #         S3 Gateway エンドポイント（無料）は Custom Resource の
+  #         CloudFormation レスポンス URL（S3 署名付き URL）送信に必要。
+  # ──────────────────────────────────────────────────────────
+
+  # Interface: CloudWatch Logs（Lambda → ログ出力）
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName:       !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcId:             !Ref VpcId
+      VpcEndpointType:   Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:  [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # Interface: Secrets Manager（Lambda → パスワード動的取得）
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName:       !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcId:             !Ref VpcId
+      VpcEndpointType:   Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:  [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # Gateway: S3（無料 / Custom Resource の CFn レスポンス URL 送信用）
+  #   CloudFormation Custom Resource のレスポンス先は S3 署名付き URL のため必須。
+  #   Gateway エンドポイントはルートテーブルへのエントリ追加のみで機能する（SG 不要）。
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName:     !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId:           !Ref VpcId
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  # ──────────────────────────────────────────────────────────
+  # [データ層] RDS サブネットグループ
+  # ──────────────────────────────────────────────────────────
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub '${ProjectName} RDS Subnet Group'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # ──────────────────────────────────────────────────────────
+  # [データ層] RDS MySQL インスタンス
+  # ──────────────────────────────────────────────────────────
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy:       Snapshot
+    UpdateReplacePolicy:  Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-db-${Stage}'
+
+      # [修正D] Stage に応じてインスタンスクラスを自動選択
+      DBInstanceClass: !If [IsProd, db.t4g.small, db.t4g.micro]
+
+      Engine:        MySQL
+      EngineVersion: '8.0.40'
+      DBName:        !Ref DBName
+      MasterUsername: !Ref DBUser
+
+      # [修正A] MasterUserPassword を削除し ManageMasterUserPassword に置き換え
+      #   RDS が Secrets Manager にシークレットを自動生成・ローテーション管理する。
+      #   シークレット ARN は MasterUserSecret.SecretArn 属性で参照可能。
+      ManageMasterUserPassword: true
+
+      AllocatedStorage: '20'
+      StorageType:      gp3
+      StorageEncrypted: true
+
+      # [修正D] prod は MultiAZ 自動有効化（コメント任せを廃止）
+      MultiAZ: !If [IsProd, true, false]
+
+      PubliclyAccessible: false
+      DBSubnetGroupName:  !Ref RDSSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+
+      # [修正D] prod はバックアップ 7 日、dev/stg は 1 日に自動設定
+      BackupRetentionPeriod: !If [IsProd, 7, 1]
+
+      # [修正D] prod は DeletionProtection 自動有効化（誤削除防止）
+      DeletionProtection: !If [IsProd, true, false]
+
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+# ============================================================
+# 出力
+# ============================================================
+Outputs:
+  CloudFrontURL:
+    Description: ゲームの公開 URL (CloudFront)
+    Value:        !Sub 'https://${CloudFrontDistribution.DomainName}'
+
+  ApiEndpoint:
+    Description: API Gateway エンドポイント
+    Value:        !Sub 'https://${SnakeApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+
+  FrontendBucketName:
+    Description: 静的ファイルのアップロード先 S3 バケット
+    Value:        !Ref FrontendBucket
+
+  RDSEndpoint:
+    Description: RDS MySQL エンドポイント（参考情報 / 直接接続不要）
+    Value:        !GetAtt RDSInstance.Endpoint.Address
+
+  # [修正A] 追加 — Secrets Manager ARN を出力（Lambda 環境変数確認・ローテーション設定用）
+  DBSecretArn:
+    Description: RDS 認証情報 Secrets Manager ARN
+    Value:        !GetAtt RDSInstance.MasterUserSecret.SecretArn

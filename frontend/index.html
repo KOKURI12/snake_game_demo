@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Snake Game</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- ===== 全体レイアウト ===== -->
+  <div id="layout">
+
+    <!-- ===== ゲームカード（プレゼンテーション層：S3/CloudFront で配信） ===== -->
+    <div id="app">
+
+      <div id="title">SNAKE</div>
+
+      <!-- HUD：スコア / ベスト -->
+      <div id="hud">
+        <div class="hud-item">
+          <span class="hud-label">SCORE</span>
+          <span class="hud-value" id="score-val">0</span>
+        </div>
+        <div class="hud-item right">
+          <span class="hud-label">BEST</span>
+          <span class="hud-value" id="hi-val">0</span>
+        </div>
+      </div>
+
+      <!-- キャンバス -->
+      <div id="game-wrap">
+        <canvas id="game-canvas"></canvas>
+      </div>
+
+      <!-- メッセージ / レベル -->
+      <div id="info-bar">
+        <div id="message">
+          <span class="desktop-only">← ↑ → ↓ / WASD で操作 &nbsp;|&nbsp; SPACE でスタート &nbsp;|&nbsp; ESC でポーズ</span>
+          <span class="touch-only">下のボタン または画面スワイプで操作</span>
+        </div>
+        <div id="level-display">LEVEL 1</div>
+      </div>
+
+      <!-- アクションボタン -->
+      <div class="btn-row">
+        <button id="action-btn" class="btn btn-primary">START</button>
+      </div>
+
+      <!-- モバイル D-pad -->
+      <div id="dpad">
+        <div class="dpad-center"></div>
+        <button class="dpad-btn" id="btn-up"    aria-label="上">&#9650;</button>
+        <div class="dpad-center"></div>
+
+        <button class="dpad-btn" id="btn-left"  aria-label="左">&#9664;</button>
+        <div class="dpad-center"></div>
+        <button class="dpad-btn" id="btn-right" aria-label="右">&#9654;</button>
+
+        <div class="dpad-center"></div>
+        <button class="dpad-btn" id="btn-down"  aria-label="下">&#9660;</button>
+        <div class="dpad-center"></div>
+      </div>
+
+    </div><!-- /#app -->
+
+    <!-- ===== ランキングパネル（データ層：RDS → Lambda → API Gateway → 表示） ===== -->
+    <div id="ranking-panel">
+      <h2>RANKING</h2>
+      <ol id="ranking-list"></ol>
+      <p id="ranking-empty">まだスコアがありません</p>
+      <p id="ranking-status"></p>
+    </div>
+
+  </div><!-- /#layout -->
+
+  <!-- ===== スコア登録モーダル ===== -->
+  <div id="score-modal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <p class="modal-title">GAME OVER</p>
+      <div class="modal-score-line">
+        <span>SCORE</span>
+        <span id="modal-final-score">0</span>
+      </div>
+      <div>
+        <label class="modal-input-label" for="player-name-input">PLAYER NAME</label>
+        <input
+          id="player-name-input"
+          type="text"
+          maxlength="20"
+          placeholder="名前を入力（省略可）"
+          autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
+        />
+      </div>
+      <div class="modal-btn-row">
+        <button id="submit-score-btn" class="btn-submit">SUBMIT</button>
+        <button id="skip-score-btn"   class="btn-skip">スキップ</button>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    API Gateway エンドポイントを上書きする場合は下記を有効化し、
+    実際の URL に変更してください。
+    <script>window.API_BASE = 'https://xxxxx.execute-api.ap-northeast-1.amazonaws.com/prod';</script>
+  -->
+
+  <!-- アプリケーション層クライアント（API Gateway 呼び出し） -->
+  <script src="js/api.js"></script>
+  <!-- ゲームロジック -->
+  <script src="js/snake.js"></script>
+
+</body>
+</html>

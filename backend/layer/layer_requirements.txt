@@ -1,0 +1,5 @@
+# PyMySQL Lambda Layer 依存定義
+# このファイルは infrastructure/template.yaml の PyMySQLLayer が参照する。
+# ContentUri: ../backend/layer/ + BuildMethod: python3.12 により
+# sam build 時に自動インストールされる。手動での pip install は不要。
+pymysql==1.1.1
