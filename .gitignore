@@ -1,3 +1,9 @@
+# SAM build成果物
+.aws-sam/
+
+# SAM設定ファイル（AWSアカウントID・リージョンが含まれる）
+samconfig.toml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
