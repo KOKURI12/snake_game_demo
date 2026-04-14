@@ -472,18 +472,18 @@ Resources:
       PrivateDnsEnabled: true
 
   # SQS キュー（スコア登録の非同期処理）20260414追加
-    ScoreQueue:
-      Type: AWS::SQS::Queue
-      Properties:
-        QueueName: !Sub '${ProjectName}-score-queue-${Stage}'
-        VisibilityTimeout: 60
-        MessageRetentionPeriod: 86400
-        RedrivePolicy:
-          deadLetterTargetArn: !GetAtt ScoreDLQ.Arn
-          maxReceiveCount: 3
+  ScoreQueue:  
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-score-queue-${Stage}'
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ScoreDLQ.Arn
+        maxReceiveCount: 3
 
   # Dead Letter Queue（失敗メッセージ隔離）
-  ScoreDLQ:
+  ScoreDLQ:  
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${ProjectName}-score-dlq-${Stage}'
@@ -571,10 +571,4 @@ Outputs:
     Description: RDS 認証情報 Secrets Manager ARN
     Value:        !GetAtt RDSInstance.MasterUserSecret.SecretArn
 
-  ScoreQueueUrl:
-    Description: スコア登録SQSキューURL
-    Value: !Ref ScoreQueue
-
-  ScoreDLQUrl:
-    Description: Dead Letter Queue URL（失敗メッセージ確認用）
-    Value: !Ref ScoreDLQ
+  
