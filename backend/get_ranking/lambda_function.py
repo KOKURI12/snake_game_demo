@@ -72,7 +72,7 @@ CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Cache-Control":               "max-age=30",   # 30秒キャッシュ（CloudFront 活用）
+    "Cache-Control": "no-cache, no-store",
 }
 
 
