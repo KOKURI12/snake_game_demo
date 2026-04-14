@@ -35,13 +35,40 @@ def lambda_handler(event, context):
         conn = get_conn()
         try:
             with conn.cursor() as cur:
+                # 同じ名前の既存レコードを確認
                 cur.execute(
-                    "INSERT INTO scores (player_name, score, level_reached) "
-                    "VALUES (%s, %s, %s)",
-                    (player_name, score, level_reached)
+                    "SELECT id, score FROM scores WHERE player_name = %s "
+                    "ORDER BY score DESC LIMIT 1",
+                    (player_name,)
                 )
+                existing = cur.fetchone()
+
+                if existing is None:
+                    # 新規登録
+                    cur.execute(
+                        "INSERT INTO scores (player_name, score, level_reached) "
+                        "VALUES (%s, %s, %s)",
+                        (player_name, score, level_reached)
+                    )
+                    print(f"[NEW] player={player_name} score={score}")
+
+                elif score > existing[1]:
+                    # 既存より高いスコアなら更新
+                    cur.execute(
+                        "UPDATE scores SET score=%s, level_reached=%s, "
+                        "created_at=CURRENT_TIMESTAMP "
+                        "WHERE id=%s",
+                        (score, level_reached, existing[0])
+                    )
+                    print(f"[UPDATE] player={player_name} "
+                          f"{existing[1]} → {score}")
+
+                else:
+                    # 既存以下のスコアは登録しない
+                    print(f"[SKIP] player={player_name} "
+                          f"score={score} <= best={existing[1]}")
+
             conn.commit()
-            print(f"[OK] player={player_name} score={score}")
         except Exception as e:
             conn.rollback()
             print(f"[ERROR] {e}")
