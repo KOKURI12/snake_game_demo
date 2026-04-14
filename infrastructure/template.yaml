@@ -184,13 +184,13 @@ Resources:
       FunctionName: !Sub '${ProjectName}-post-score-${Stage}'
       CodeUri:      ../backend/post_score/
       Handler:      lambda_function.lambda_handler
-      Description:  スコア登録 API (POST /scores)
-      Layers:
-        - !Ref PyMySQLLayer
-      # [修正A] Secrets Manager GetSecretValue 権限を付与
+      Description:  スコア登録 API (POST /scores) → SQSへ送信
       Policies:
-        - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ScoreQueue.QueueName
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref ScoreQueue
       Events:
         PostScore:
           Type: HttpApi
@@ -222,6 +222,29 @@ Resources:
             ApiId:  !Ref SnakeApi
             Path:   /ranking
             Method: GET
+  # ──────────────────────────────────────────────────────────
+  # [アプリケーション層] Lambda — スコア登録Worker（SQSトリガー）
+  # ──────────────────────────────────────────────────────────
+  PostScoreWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-post-score-worker-${Stage}'
+      CodeUri:      ../backend/post_score_worker/
+      Handler:      lambda_function.lambda_handler
+      Description:  SQSトリガー：スコアをRDSに書き込む
+      Layers:
+        - !Ref PyMySQLLayer
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+        - SQSPollerPolicy:
+            QueueName: !GetAtt ScoreQueue.QueueName
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ScoreQueue.Arn
+            BatchSize: 10
 
   # ──────────────────────────────────────────────────────────
   # Lambda Layer — PyMySQL 共有ライブラリ
@@ -435,6 +458,36 @@ Resources:
       RouteTableIds:
         - !Ref PrivateRouteTable
 
+  # Interface: SQS（Lambda → キュー送信）
+  SQSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName:       !Sub 'com.amazonaws.${AWS::Region}.sqs'
+      VpcId:             !Ref VpcId
+      VpcEndpointType:   Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:  [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # SQS キュー（スコア登録の非同期処理）20260414追加
+    ScoreQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: !Sub '${ProjectName}-score-queue-${Stage}'
+        VisibilityTimeout: 60
+        MessageRetentionPeriod: 86400
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ScoreDLQ.Arn
+          maxReceiveCount: 3
+
+  # Dead Letter Queue（失敗メッセージ隔離）
+  ScoreDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-score-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
   # ──────────────────────────────────────────────────────────
   # [データ層] RDS サブネットグループ
   # ──────────────────────────────────────────────────────────
@@ -517,3 +570,11 @@ Outputs:
   DBSecretArn:
     Description: RDS 認証情報 Secrets Manager ARN
     Value:        !GetAtt RDSInstance.MasterUserSecret.SecretArn
+
+  ScoreQueueUrl:
+    Description: スコア登録SQSキューURL
+    Value: !Ref ScoreQueue
+
+  ScoreDLQUrl:
+    Description: Dead Letter Queue URL（失敗メッセージ確認用）
+    Value: !Ref ScoreDLQ

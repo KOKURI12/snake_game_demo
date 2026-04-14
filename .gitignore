@@ -4,6 +4,9 @@
 # SAM設定ファイル（AWSアカウントID・リージョンが含まれる）
 samconfig.toml
 
+# バックアップファイル
+*_bk.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -211,3 +214,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+*_bk.yaml
+memo.txt
