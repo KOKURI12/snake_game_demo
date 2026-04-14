@@ -336,6 +336,7 @@
       submitBtn.textContent = 'SUBMIT';
       submitBtn.disabled = false;
       setRankingStatus('ランキング更新中…');
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await loadRanking();
       closeModal();
       setRankingStatus('登録完了！ランキングを更新しました');
