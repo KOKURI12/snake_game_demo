@@ -58,7 +58,7 @@
    * @returns {Promise<Array<{rank:number, player_name:string, score:number, level_reached:number}>>}
    */
   async function getRanking(limit = 10) {
-    const res = await fetchWithTimeout(`${API_BASE}/ranking?limit=${limit}`);
+    const res = await fetchWithTimeout(`${API_BASE}/ranking?limit=${limit}&t=${Date.now()}`);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`getRanking failed: ${res.status} ${body}`);

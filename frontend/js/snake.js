@@ -324,14 +324,21 @@
   }
 
   async function handleScoreSubmit() {
-    const name = playerNameEl.value.trim() || 'ANONYMOUS';
+    const name = playerNameEl.value.trim();
+     if (!name) {
+    setRankingStatus('名前入力わすれていませんか？！');
+    return;
+  }
     submitBtn.disabled = true;
     submitBtn.textContent = '登録中…';
     try {
       await window.SnakeAPI.postScore(name, score, lvl);
+      submitBtn.textContent = 'SUBMIT';
+      submitBtn.disabled = false;
+      setRankingStatus('ランキング更新中…');
+      await loadRanking();
       closeModal();
-      setRankingStatus('登録完了！');
-      loadRanking();
+      setRankingStatus('登録完了！ランキングを更新しました');
     } catch (err) {
       submitBtn.textContent = 'SUBMIT';
       submitBtn.disabled = false;

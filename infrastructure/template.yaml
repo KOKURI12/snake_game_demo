@@ -69,10 +69,10 @@ Conditions:
 # ============================================================
 Globals:
   Function:
-    Runtime:       python3.12
+    Runtime:       python3.9
     Timeout:       15
     MemorySize:    256
-    Architectures: [arm64]
+    Architectures: [x86_64]
     Environment:
       Variables:
         DB_HOST: !GetAtt RDSInstance.Endpoint.Address
@@ -232,10 +232,10 @@ Resources:
       LayerName:               !Sub '${ProjectName}-pymysql'
       Description:             PyMySQL for Python 3.12
       ContentUri:              ../backend/layer/
-      CompatibleRuntimes:      [python3.12]
-      CompatibleArchitectures: [arm64]
+      CompatibleRuntimes:      [python3.9]
+      CompatibleArchitectures: [x86_64]
     Metadata:
-      BuildMethod: python3.12
+      BuildMethod: python3.9
 
   # ──────────────────────────────────────────────────────────
   # [修正C] RDS スキーマ自動初期化 — Custom Resource
